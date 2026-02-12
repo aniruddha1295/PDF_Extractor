@@ -1,0 +1,54 @@
+# Zomato / Burger King Invoice Template Configuration
+
+template:
+  name: "zomato"
+  version: "1.0"
+  description: "Zomato / Burger King / Eternal Limited style invoices"
+
+header_extraction:
+  fields:
+    invoice_number:
+      keywords: ["invoice no", "invoice number"]
+      regex: 'Invoice\s*No\.?\s*:?\s*(\S+)'
+    invoice_date:
+      keywords: ["invoice date"]
+      regex: 'Invoice\s*Date\s*:?\s*(\d{2}/\d{2}/\d{4})'
+      date_format: "%d/%m/%Y"
+    vendor_name:
+      keywords: ["restaurant name"]
+      regex: 'Restaurant\s*Name\s*:\s*(.+?)(?:\r?\n|$)'
+    vendor_gst:
+      keywords: ["restaurant gstin"]
+      regex: 'Restaurant\s*GSTIN\s*:\s*(.+?)(?:\r?\n|$)'
+    customer_name:
+      keywords: ["customer name"]
+      regex: 'Customer\s*Name\s*:\s*(.+?)(?:\r?\n|$)'
+    state:
+      keywords: ["state name", "place of supply"]
+      regex: 'State\s*name\s*&?\s*Place\s*of\s*Supply\s*:?\s*(.+?)(?:\r?\n|$)'
+
+table_extraction:
+  mode: "lattice"
+  required_columns:
+    - "particulars"
+    - "gross value"
+    - "total"
+  column_mapping:
+    "particulars": "description"
+    "gross value": "gross_value"
+    "discount": "discount"
+    "net value": "net_value"
+    "cgst (rate)": "cgst_rate"
+    "cgst (inr)": "cgst_amount"
+    "sgst (rate)": "sgst_rate"
+    "sgst (inr)": "sgst_amount"
+    "total": "total"
+
+row_classification:
+  summary_keywords:
+    - "item(s) total"
+  exclude_keywords:
+    - "total value"
+
+grand_total:
+  keywords: ["total value", "grand total"]

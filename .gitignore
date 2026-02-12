@@ -1,0 +1,24 @@
+# Excel temp/lock files
+~$*.xlsx
+~$*.xlxs
+
+# Output directory (generated files)
+output/
+
+# Test result files in root
+my_result.xlsx
+my_result.xlxs
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
