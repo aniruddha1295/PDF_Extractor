@@ -1,8 +1,9 @@
 """
-Invoice Extraction Engine v1 — CLI Entry Point
+Invoice Extraction Engine v1 - CLI Entry Point
 
 Usage:
     python main.py --input <path/to/invoice.pdf> --template zomato [--output <path/to/output.xlsx>]
+    python main.py --input <path/to/invoice.pdf> --template flipkart [--output <path/to/output.xlsx>]
 """
 
 import argparse
@@ -28,7 +29,7 @@ from invoice_extractor.excel_writer import write_excel
 from invoice_extractor.header_extractor import extract_headers, extract_state
 from invoice_extractor.pdf_loader import load_pdf
 from invoice_extractor.row_classifier import classify_rows, ROW_TYPE_LINE_ITEM
-from invoice_extractor.schema import LineItem, ZomatoInvoice
+from invoice_extractor.schema import LineItem, ExtractedInvoice, ZomatoInvoice
 from invoice_extractor.summary_detector import detect_grand_total
 from invoice_extractor.table_parser import extract_table
 from invoice_extractor.text_parser import extract_text
@@ -66,8 +67,8 @@ def load_template(template_name: str) -> dict:
     return config
 
 
-def build_line_items(classified_rows, column_mapping_inv) -> list:
-    """Build LineItem objects from classified line-item rows."""
+def build_line_items_zomato(classified_rows, column_mapping_inv) -> list:
+    """Build LineItem objects from classified line-item rows (Zomato pipeline)."""
     line_items = []
 
     for idx, row_type, row_data in classified_rows:
@@ -90,21 +91,28 @@ def build_line_items(classified_rows, column_mapping_inv) -> list:
     return line_items
 
 
-def run_pipeline(input_path: str, template_name: str, output_path: str) -> str:
-    """
-    Run the full invoice extraction pipeline.
+def build_line_items_flipkart(items_data: list) -> list:
+    """Build LineItem objects from Flipkart text-extracted data."""
+    line_items = []
 
-    Args:
-        input_path: Path to the input PDF.
-        template_name: Template name (e.g., "zomato").
-        output_path: Path for the output Excel file.
+    for item_data in items_data:
+        item = LineItem(
+            description=str(item_data.get("description", "")).strip(),
+            gross_value=parse_decimal(item_data.get("gross_value", "0")),
+            discount=parse_decimal(item_data.get("discount", "0")),
+            net_value=parse_decimal(item_data.get("net_value", "0")),
+            igst_rate=parse_percentage(item_data.get("igst_rate", "0")),
+            igst_amount=parse_decimal(item_data.get("igst_amount", "0")),
+            cess_amount=parse_decimal(item_data.get("cess_amount", "0")),
+            total=parse_decimal(item_data.get("total", "0")),
+        )
+        line_items.append(item)
 
-    Returns:
-        Path to the generated Excel file.
-    """
-    # Step 1: Load template configuration
-    config = load_template(template_name)
+    return line_items
 
+
+def run_pipeline_zomato(input_path: str, config: dict, output_path: str) -> str:
+    """Run the Zomato/lattice-based extraction pipeline."""
     # Step 2: Load PDF
     logger.info(f"Loading PDF: {input_path}")
     pdf = load_pdf(input_path)
@@ -139,15 +147,14 @@ def run_pipeline(input_path: str, template_name: str, output_path: str) -> str:
 
         # Step 8: Build line items
         logger.info("Building line items...")
-        line_items = build_line_items(classified, column_mapping)
+        line_items = build_line_items_zomato(classified, column_mapping)
 
         if len(line_items) == 0:
-            from invoice_extractor.errors import NoLineItemsError
             raise NoLineItemsError("No valid line items were extracted.")
 
         # Step 9: Build invoice schema object
         logger.info("Building invoice schema...")
-        invoice = ZomatoInvoice(
+        invoice = ExtractedInvoice(
             invoice_number=headers["invoice_number"],
             invoice_date=headers["invoice_date"],
             vendor_name=headers["vendor_name"],
@@ -157,6 +164,7 @@ def run_pipeline(input_path: str, template_name: str, output_path: str) -> str:
             line_items=line_items,
             grand_total_raw=grand_total_raw,
             grand_total_rounded=grand_total_rounded,
+            tax_type="cgst_sgst",
         )
 
         # Step 10: Validate
@@ -165,30 +173,139 @@ def run_pipeline(input_path: str, template_name: str, output_path: str) -> str:
 
         # Step 11: Write Excel
         logger.info("Writing Excel output...")
-
-        # If output path uses invoice number placeholder, resolve it
         if output_path is None:
             output_dir = Path(input_path).parent / "output"
             output_path = str(output_dir / f"{invoice.invoice_number}_extracted.xlsx")
 
         result_path = write_excel(invoice, output_path)
         logger.info(f"SUCCESS: Invoice extracted and saved to {result_path}")
-
         return result_path
 
     finally:
         pdf.close()
 
 
+def run_pipeline_flipkart(input_path: str, config: dict, output_path: str) -> str:
+    """Run the Flipkart/text-based extraction pipeline."""
+    import pdfplumber
+    from invoice_extractor.text_table_parser import extract_flipkart_data
+
+    # Step 2: Load PDF and extract all page texts
+    logger.info(f"Loading PDF: {input_path}")
+    pdf = load_pdf(input_path)
+
+    try:
+        page_texts = []
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            page_texts.append(text)
+        logger.info(f"PDF has {len(page_texts)} pages")
+
+        # Step 3-7: Extract all data using text-based parser
+        logger.info("Extracting Flipkart invoice data (text-based)...")
+        extracted = extract_flipkart_data("", page_texts, config)
+
+        headers = extracted["headers"]
+        line_items_data = extracted["line_items"]
+        grand_total_raw = extracted["grand_total_raw"]
+
+        # Clean state field
+        state_raw = headers.get("state", "")
+        if state_raw:
+            import re
+            state_raw = re.sub(r'\(\d+\)', '', state_raw).strip()
+            state_raw = re.sub(r'IN-\w+', '', state_raw).strip().rstrip(',').strip()
+        headers["state"] = state_raw if state_raw else "Unknown"
+
+        # Parse invoice date
+        invoice_date = headers.get("invoice_date", "")
+        if isinstance(invoice_date, str) and invoice_date:
+            from datetime import datetime
+            date_format = config.get("header_extraction", {}).get("fields", {}).get(
+                "invoice_date", {}
+            ).get("date_format", "%d-%m-%Y")
+            try:
+                date_part = invoice_date.split(",")[0].strip()
+                invoice_date = datetime.strptime(date_part, date_format).date()
+            except ValueError:
+                logger.warning(f"Could not parse date: {invoice_date}")
+                from datetime import date
+                invoice_date = date.today()
+
+        # Step 8: Build line items
+        logger.info("Building line items...")
+        line_items = build_line_items_flipkart(line_items_data)
+
+        if len(line_items) == 0:
+            raise NoLineItemsError("No valid line items were extracted.")
+
+        # Calculate grand total rounded
+        from decimal import Decimal, ROUND_HALF_UP
+        grand_total_rounded = grand_total_raw.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+        # Step 9: Build invoice schema
+        logger.info("Building invoice schema...")
+        invoice = ExtractedInvoice(
+            invoice_number=headers.get("invoice_number", "UNKNOWN"),
+            invoice_date=invoice_date,
+            vendor_name=headers.get("vendor_name", "Unknown"),
+            vendor_gst=headers.get("vendor_gst", "UNREGISTERED").strip(),
+            customer_name=headers.get("customer_name", "Unknown"),
+            state=headers["state"],
+            line_items=line_items,
+            grand_total_raw=grand_total_raw,
+            grand_total_rounded=grand_total_rounded,
+            order_id=headers.get("order_id", None),
+            tax_type="igst",
+        )
+
+        # Step 10: Validate
+        logger.info("Validating invoice data...")
+        validate_invoice(invoice)
+
+        # Step 11: Write Excel
+        logger.info("Writing Excel output...")
+        if output_path is None:
+            output_dir = Path(input_path).parent / "output"
+            output_path = str(output_dir / f"{invoice.invoice_number}_extracted.xlsx")
+
+        result_path = write_excel(invoice, output_path)
+        logger.info(f"SUCCESS: Invoice extracted and saved to {result_path}")
+        return result_path
+
+    finally:
+        pdf.close()
+
+
+def run_pipeline(input_path: str, template_name: str, output_path: str) -> str:
+    """
+    Run the full invoice extraction pipeline.
+
+    Dispatches to the appropriate pipeline based on the template's extraction_mode.
+    """
+    # Step 1: Load template configuration
+    config = load_template(template_name)
+
+    # Determine extraction mode
+    extraction_mode = config.get("extraction_mode", "lattice")
+    logger.info(f"Extraction mode: {extraction_mode}")
+
+    if extraction_mode == "text":
+        return run_pipeline_flipkart(input_path, config, output_path)
+    else:
+        return run_pipeline_zomato(input_path, config, output_path)
+
+
 def main():
     """CLI entry point."""
     parser = argparse.ArgumentParser(
-        description="Invoice Extraction Engine v1 - Extract structured data from Zomato-style invoices",
+        description="Invoice Extraction Engine v1 - Extract structured data from PDF invoices",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python main.py --input invoice.pdf --template zomato
-  python main.py --input invoice.pdf --template zomato --output result.xlsx
+  python main.py --input invoice.pdf --template flipkart
+  python main.py --input invoice.pdf --template flipkart --output result.xlsx
         """,
     )
 
@@ -200,7 +317,7 @@ Examples:
     parser.add_argument(
         "--template", "-t",
         required=True,
-        help="Template name (e.g., 'zomato'). Must match a YAML file in templates/",
+        help="Template name (e.g., 'zomato', 'flipkart'). Must match a YAML file in templates/",
     )
     parser.add_argument(
         "--output", "-o",

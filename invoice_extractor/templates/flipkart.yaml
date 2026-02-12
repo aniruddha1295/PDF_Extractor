@@ -1,0 +1,45 @@
+# Flipkart Product Tax Invoice Template Configuration
+
+template:
+  name: "flipkart"
+  version: "1.0"
+  description: "Flipkart marketplace seller invoice (product Tax Invoice page)"
+
+# Flipkart invoices are multi-page. The product invoice is on the last page.
+extraction_mode: "text"
+tax_type: "igst"
+
+# Flipkart PDFs have GTA/shipping pages first, product invoice last.
+# We auto-detect the product invoice page.
+page_selection: "auto_detect_last"
+
+header_extraction:
+  fields:
+    invoice_number:
+      keywords: ["invoice no", "invoice number"]
+      regex: 'Invoice\s*(?:No|Number)\s*[:#]?\s*(\S+)'
+    invoice_date:
+      keywords: ["invoice date"]
+      regex: 'Invoice\s*Date\s*[:#]?\s*(\d{2}-\d{2}-\d{4})'
+      date_format: "%d-%m-%Y"
+    vendor_name:
+      keywords: ["sold by"]
+      regex: 'Sold\s*By\s*[:#]?\s*([^,\n]+)'
+    vendor_gst:
+      keywords: ["gstin", "gst"]
+      regex: 'GSTIN?\s*[-:#]?\s*([0-9A-Z]{15})'
+    customer_name:
+      keywords: ["bill to", "billing address"]
+      regex: '(?:Bill\s*To|Billing\s*Address)\s*(?:Ship\s*To|Shipping\s*ADDRESS)?\s*\n?\s*(?:\S+\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'
+    order_id:
+      keywords: ["order id"]
+      regex: 'Order\s*(?:Id|ID)\s*[:#]?\s*(OD\d+)'
+    state:
+      keywords: ["state"]
+      regex: '(?:State\s*:\s*|,\s*)([\w\s]+?)(?:\s*[-,]|\s*\d{6})'
+
+grand_total:
+  keywords: ["total price", "grand total"]
+  patterns:
+    - 'Grand\s*Total\s*(?:Rs\.?|INR|₹)?\s*([\d,]+\.?\d*)'
+    - 'TOTAL\s*PRICE:\s*([\d,]+\.?\d*)'
